@@ -1,0 +1,217 @@
+running project in command prompt 
+cd C:\Users\AVADUT\RealTime_Network_Analyzer
+venv\Scripts\activate
+pip install -r requirements.txt
+python src\train.py
+cd web
+python app.py
+
+or 
+
+cd C:\Users\AVADUT\RealTime_Network_Analyzer
+venv\Scripts\activate
+set PYTHONPATH=%cd%\src
+python web\app.py
+
+
+from flask import Flask, render_template, request, redirect, send_file
+from werkzeug.utils import secure_filename
+from nfstream import NFStreamer
+from utils import load_model
+import os
+import pandas as pd
+
+UPLOAD_FOLDER = "../data/uploads/"
+ALLOWED_EXTENSIONS = {'pcap', 'pcapng'}
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def extract_features_from_flow(flow):
+    return [
+        flow.bidirectional_bytes,
+        flow.bidirectional_packets,
+        flow.duration
+    ]
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST":
+        if "file" not in request.files:
+            return "No file part"
+        file = request.files["file"]
+        if file.filename == "":
+            return "No selected file"
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            return redirect(f"/results?file={filename}")
+    return render_template("index.html")
+
+@app.route("/results")
+def results():
+    filename = request.args.get("file")
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    model, scaler = load_model()
+
+    streamer = NFStreamer(source=filepath, statistical_analysis=True, decode_tunnels=True)
+    records = []
+    for flow in streamer:
+        features = extract_features_from_flow(flow)
+        df = pd.DataFrame([features])
+        df_scaled = scaler.transform(df)
+        pred = model.predict(df_scaled)
+        records.append({
+            "src_ip": flow.src_ip,
+            "dst_ip": flow.dst_ip,
+            "prediction": pred[0]
+        })
+    df_results = pd.DataFrame(records)
+    normal_count = len(df_results[df_results["prediction"] == "normal"])
+    attack_count = len(df_results[df_results["prediction"] != "normal"])
+    result_file = os.path.join(app.config['UPLOAD_FOLDER'], filename + "_results.csv")
+    df_results.to_csv(result_file, index=False)
+    return render_template("results.html",
+                           normal_count=normal_count,
+                           attack_count=attack_count,
+                           result_file=result_file.split("../")[-1])
+
+@app.route("/download/<path:filename>")
+def download(filename):
+    return send_file(os.path.join("..", filename), as_attachment=True)
+
+if __name__ == "__main__":
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    app.run(debug=True)
+
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RealTime Network Analyzer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>RealTime Network Analyzer</h1>
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
+
+{% extends "base.html" %}
+{% block content %}
+<form method="POST" enctype="multipart/form-data">
+    <label>Upload PCAP File:</label>
+    <input type="file" name="file" required>
+    <button type="submit">Analyze</button>
+</form>
+{% endblock %}
+
+{% extends "base.html" %}
+{% block content %}
+<h2>Analysis Results</h2>
+<p>Normal Flows: {{ normal_count }}</p>
+<p>Attack Flows: {{ attack_count }}</p>
+<a href="{{ url_for('download', filename=result_file) }}">Download Full CSV</a>
+<a href="{{ url_for('index') }}">Analyze Another File</a>
+{% endblock %}
+
+body { font-family: Arial, sans-serif; background: #f5f5f5; }
+.container { max-width: 700px; margin: 50px auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1);}
+h1 { text-align: center; }
+form { display: flex; flex-direction: column; gap: 10px; }
+button { padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+button:hover { background: #0056b3; }
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+import pandas as pd
+from utils import load_dataset, save_model, scale_features
+
+# Load datasets
+train_df, test_df = load_dataset()  # filenames default to KDDTrain+.txt / KDDTest+.txt
+
+# Split features and labels
+X_train = train_df.iloc[:, :-1]
+y_train = train_df.iloc[:, -1]
+
+X_test = test_df.iloc[:, :-1]
+y_test = test_df.iloc[:, -1]
+
+# Encode categorical columns
+for col in X_train.columns:
+    if X_train[col].dtype == 'object':
+        X_train[col] = X_train[col].astype('category').cat.codes
+        X_test[col] = X_test[col].astype('category').cat.codes
+
+# Scale features
+X_train_scaled, X_test_scaled, scaler = scale_features(X_train, X_test)
+
+# Train model
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train_scaled, y_train)
+
+# Save model and scaler
+save_model(model, scaler)
+
+# Evaluate
+y_pred = model.predict(X_test_scaled)
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+print("Model training complete. Saved to models/ folder.")
+
+import pandas as pd
+import joblib
+from sklearn.preprocessing import StandardScaler
+import os
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+def load_dataset(train_file="KDDTrain+.txt", test_file="KDDTest+.txt"):
+    """
+    Load NSL-KDD datasets using absolute paths.
+    """
+    train_path = os.path.join(BASE_DIR, "data", "datasets", train_file)
+    test_path = os.path.join(BASE_DIR, "data", "datasets", test_file)
+    
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(f"Train file not found: {train_path}")
+    if not os.path.exists(test_path):
+        raise FileNotFoundError(f"Test file not found: {test_path}")
+    
+    train_df = pd.read_csv(train_path, header=None)
+    test_df = pd.read_csv(test_path, header=None)
+    
+    return train_df, test_df
+
+def save_model(model, scaler, model_path=None, scaler_path=None):
+    if model_path is None:
+        model_path = os.path.join(BASE_DIR, "models", "rf_model.pkl")
+    if scaler_path is None:
+        scaler_path = os.path.join(BASE_DIR, "models", "scaler.pkl")
+    joblib.dump(model, model_path)
+    joblib.dump(scaler, scaler_path)
+
+def load_model(model_path=None, scaler_path=None):
+    if model_path is None:
+        model_path = os.path.join(BASE_DIR, "models", "rf_model.pkl")
+    if scaler_path is None:
+        scaler_path = os.path.join(BASE_DIR, "models", "scaler.pkl")
+    model = joblib.load(model_path)
+    scaler = joblib.load(scaler_path)
+    return model, scaler
+
+def scale_features(X_train, X_test):
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    return X_train_scaled, X_test_scaled, scaler
+
+
+
+
