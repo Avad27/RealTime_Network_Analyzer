@@ -1,4 +1,3 @@
-nfstream>=6.5.3
 pandas>=1.3.0
 scikit-learn>=1.0.0
 Flask>=2.0.0
@@ -14,3 +13,4 @@ dnspython
 validators
 flask-cors
 gunicorn
+
