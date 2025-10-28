@@ -8,9 +8,9 @@ pandas
 scikit-learn
 joblib
 gunicorn
-nfstream
 dnspython
 validators
 flask-cors
 gunicorn
+
 
